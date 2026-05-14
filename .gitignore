@@ -1,6 +1,7 @@
-.gitignore
-/Analysis_Results
-/output_baseline
-/white_boundaries
-/venv
+#Ignore these directories and file types
+Analysis_Results
+output_baseline
+white_boundaries
+venv
 *.pyc
+.gitignore
