@@ -2,4 +2,4 @@
 /output_baseline
 /white_boundaries
 /venv
-.gitignore
+*.pyc
