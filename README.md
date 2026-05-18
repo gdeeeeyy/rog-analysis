@@ -54,3 +54,12 @@ python run_rog.py \
 - **`vis/`**: GIFs showing the original frames with overlaid bounding boxes (dotted cyan/yellow for pre-merge, solid green for merged) and red flame boundaries.
 - **`plots/`**: Trend plots for Perimeter, Area, Length, Breadth, and Growth Rates.
 - **`frame_analytics/`**: Detailed scatter plots and averages for first and last merged frames.
+
+
+./venv/bin/python run_rog.py \
+    --image_dir output_baseline \
+    --mask_dir white_boundaries \
+    --output_dir Analysis_Results \
+    --csv_file agni-manual-logging.csv \
+    --frame_analytics \
+    --max_cycles 3
