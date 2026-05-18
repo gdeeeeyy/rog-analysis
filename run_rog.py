@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--csv_file', default='', help="Agni manual logging CSV (optional)")
     parser.add_argument('--process_tags', default='Usable', help="Comma-separated tags to process")
     parser.add_argument('--frame_analytics', action='store_true', help="Generate scatter plots")
+    parser.add_argument('--max_cycles', type=int, default=None, help="Maximum number of cycles to process (for testing)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -25,6 +26,11 @@ def main():
 
     # 1. Group images into cycles
     cycle_files = utils.get_cycle_files(args.image_dir, args.csv_file, args.process_tags)
+    
+    if args.max_cycles is not None and args.max_cycles > 0:
+        sorted_keys = sorted(cycle_files.keys())[:args.max_cycles]
+        cycle_files = {k: cycle_files[k] for k in sorted_keys}
+        print(f"Limiting processing to the first {args.max_cycles} cycles: {sorted_keys}")
     
     if not cycle_files:
         print("No valid files found to process.")
@@ -101,25 +107,33 @@ def main():
     # 3. Analytics and Reporting
     final_df = pd.DataFrame(all_data)
     if not final_df.empty:
+        # First, calculate raw growth rates and save the raw data for all cycles to a CSV first
         final_df = analytics.calculate_growth_rates(final_df)
         final_df.to_csv(os.path.join(args.output_dir, "combined_rog_results.csv"), index=False)
-        analytics.calculate_slopes(final_df, args.output_dir)
+        
+        # Second, perform variance calculation and outlier removal to make sure plots are smooth
+        # This outlier-cleared length and breadth will be used for the trend and RoG plots
+        cleaned_df = analytics.remove_outliers_and_smooth(final_df)
+        
+        # Re-calculate the growth rates on the outlier-cleaned data
+        cleaned_df = analytics.calculate_growth_rates(cleaned_df)
+        
+        # Calculate slopes on the cleaned data
+        analytics.calculate_slopes(cleaned_df, args.output_dir)
         
         plot_dir = os.path.join(args.output_dir, "plots")
         os.makedirs(plot_dir, exist_ok=True)
         
-        # Trend Plots
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_bbox_length_plot.png"), "BBox Length Trend", 'BBox_Length')
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_bbox_breadth_plot.png"), "BBox Breadth Trend", 'BBox_Breadth')
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_perimeter_plot.png"), "Flame Perimeter Trend", 'Precise_Perim')
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_bbox_area_plot.png"), "Flame Area Trend", 'Precise_Area')
+        # Trend Plots (using outlier cleared data, no area plots)
+        analytics.plot_rog_data(cleaned_df, os.path.join(plot_dir, "combined_bbox_length_plot.png"), "BBox Length Trend", 'BBox_Length')
+        analytics.plot_rog_data(cleaned_df, os.path.join(plot_dir, "combined_bbox_breadth_plot.png"), "BBox Breadth Trend", 'BBox_Breadth')
+        analytics.plot_rog_data(cleaned_df, os.path.join(plot_dir, "combined_perimeter_plot.png"), "Flame Perimeter Trend", 'Precise_Perim')
         
-        # RoG Plots
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_growth_rate_perim_plot.png"), "Perimeter Growth Rate (%)", 'GrowthRate_Perim')
-        analytics.plot_rog_data(final_df, os.path.join(plot_dir, "combined_growth_rate_area_plot.png"), "Area Growth Rate (%)", 'GrowthRate_Area')
+        # RoG Plots (growth rate plots of perimeter only, using outlier cleared data)
+        analytics.plot_rog_data(cleaned_df, os.path.join(plot_dir, "combined_growth_rate_perim_plot.png"), "Perimeter Growth Rate (%)", 'GrowthRate_Perim')
         
         if args.frame_analytics:
-            analytics.plot_frame_analytics(final_df, os.path.join(args.output_dir, "frame_analytics"))
+            analytics.plot_frame_analytics(cleaned_df, os.path.join(args.output_dir, "frame_analytics"))
             
     print(f"Pipeline complete! Results saved to {args.output_dir}")
 

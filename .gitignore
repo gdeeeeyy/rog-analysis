@@ -1,7 +1,10 @@
 #Ignore these directories and file types
 Analysis_Results
+Analysis_Results_Test
+Analysis_Results_New
 output_baseline
 white_boundaries
 venv
 *.pyc
 .gitignore
+agni-swarna-pipeline/

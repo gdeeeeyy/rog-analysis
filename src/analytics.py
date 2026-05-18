@@ -37,8 +37,86 @@ def calculate_growth_rates(df):
                 
     return df
 
-def plot_rog_data(df, output_path, title, metric='BBox_Area'):
-    """Generates the trend plots."""
+def remove_outliers_and_smooth(df):
+    """
+    Identifies and removes outliers in 'BBox_Length' and 'BBox_Breadth' per cycle.
+    Uses rolling statistics (median and variance/std) to detect anomalies,
+    replaces them, and interpolates to ensure smooth plotting.
+    Then re-calculates Precise_Perim and other dependent metrics.
+    Also applies a Savitzky-Golay smoothing filter to make trends clean.
+    """
+    if df.empty: return df
+    
+    cleaned_df = df.copy()
+    
+    # 1. Clean outliers in BBox_Length and BBox_Breadth for each cycle
+    for cycle in cleaned_df['Cycle'].unique():
+        idx = cleaned_df[cleaned_df['Cycle'] == cycle].index
+        group = cleaned_df.loc[idx].sort_values('RelativeFrame')
+        
+        if len(group) < 5:
+            continue
+            
+        for col in ['BBox_Length', 'BBox_Breadth']:
+            # Using rolling median as local trend
+            rolling_med = group[col].rolling(window=11, center=True, min_periods=1).median()
+            
+            # Variance of residuals (deviation from local trend)
+            residuals = group[col] - rolling_med
+            variance = residuals.var()
+            std_dev = np.sqrt(variance) if variance > 0 else 1.0
+            
+            # Outlier threshold (e.g. 2 standard deviations, minimum of 3 pixels)
+            threshold = max(2.0 * std_dev, 3.0)
+            outliers = residuals.abs() > threshold
+            
+            cleaned_vals = group[col].copy()
+            cleaned_vals[outliers] = np.nan
+            
+            # Interpolate to fill gaps smoothly
+            cleaned_vals = cleaned_vals.interpolate(method='linear', limit_direction='both')
+            cleaned_df.loc[idx, col] = cleaned_vals
+
+    # 2. Recalculate BBox_Area based on cleaned values
+    cleaned_df['BBox_Area'] = cleaned_df['BBox_Length'] * cleaned_df['BBox_Breadth']
+    
+    # 3. Update Precise_Perim using cleaned length and breadth
+    # Identify if original perimeter was just BBox perimeter: 2 * (BBox_Length + BBox_Breadth)
+    is_bbox_perim = (df['Precise_Perim'] - 2 * (df['BBox_Length'] + df['BBox_Breadth'])).abs() < 1e-3
+    
+    cleaned_df.loc[is_bbox_perim, 'Precise_Perim'] = 2 * (cleaned_df.loc[is_bbox_perim, 'BBox_Length'] + cleaned_df.loc[is_bbox_perim, 'BBox_Breadth'])
+    
+    # For mask-based perimeters (if any), also remove their outliers directly using the same method
+    mask_perim_mask = ~is_bbox_perim
+    if mask_perim_mask.any():
+        for cycle in cleaned_df['Cycle'].unique():
+            idx = cleaned_df[(cleaned_df['Cycle'] == cycle) & mask_perim_mask].index
+            if len(idx) < 5: continue
+            vals = cleaned_df.loc[idx, 'Precise_Perim']
+            rolling_med = vals.rolling(window=11, center=True, min_periods=1).median()
+            residuals = vals - rolling_med
+            std_dev = np.sqrt(residuals.var()) if residuals.var() > 0 else 1.0
+            threshold = max(2.0 * std_dev, 3.0)
+            outliers = residuals.abs() > threshold
+            cleaned_vals = vals.copy()
+            cleaned_vals[outliers] = np.nan
+            cleaned_vals = cleaned_vals.interpolate(method='linear', limit_direction='both')
+            cleaned_df.loc[idx, 'Precise_Perim'] = cleaned_vals
+            
+    # 4. Apply Savitzky-Golay smoothing filter to length, breadth, and perimeter per cycle
+    # to guarantee beautiful, smooth trends.
+    from scipy.signal import savgol_filter
+    for cycle in cleaned_df['Cycle'].unique():
+        idx = cleaned_df[cleaned_df['Cycle'] == cycle].index
+        group = cleaned_df.loc[idx].sort_values('RelativeFrame')
+        if len(group) > 11:
+            for col in ['BBox_Length', 'BBox_Breadth', 'Precise_Perim']:
+                cleaned_df.loc[idx, col] = savgol_filter(group[col], window_length=11, polyorder=2)
+                
+    return cleaned_df
+
+def plot_rog_data(df, output_path, title, metric='Precise_Perim'):
+    """Generates the trend plots without dots (lines only), with bottom padding and proper cycle representations."""
     if df.empty: return
     plt.figure(figsize=(15, 8))
     colors = plt.cm.tab20(np.linspace(0, 1, 20))
@@ -56,36 +134,58 @@ def plot_rog_data(df, output_path, title, metric='BBox_Area'):
         pre = c_df[~c_df['IsMerged']]
         post = c_df[c_df['IsMerged']]
         
+        label_added = False
+        
+        # Plot pre-merge line (no marker/dots, just dashed line)
         if not pre.empty:
-            plt.plot(pre['RelativeFrame'], pre[metric], color=color, linestyle='--', marker='^', markersize=4, alpha=0.6, label=f"Cycle {cycle} (Pre-merge)" if i < 10 else "_nolegend_")
+            plt.plot(pre['RelativeFrame'], pre[metric], color=color, linestyle='--', alpha=0.6, 
+                     label=f"Cycle {cycle}" if not label_added else "_nolegend_")
+            label_added = True
+            
+        # Plot post-merge line (no marker/dots, just solid line)
         if not post.empty:
-            plt.plot(post['RelativeFrame'], post[metric], color=color, linestyle='-', marker='o', markersize=4, alpha=0.9, label=f"Cycle {cycle} (Merged)" if i < 10 else "_nolegend_")
+            plt.plot(post['RelativeFrame'], post[metric], color=color, linestyle='-', alpha=0.9, 
+                     label=f"Cycle {cycle}" if not label_added else "_nolegend_")
+            label_added = True
             
         if not pre.empty and not post.empty:
             merge_frame = post['RelativeFrame'].min()
             plt.axvline(x=merge_frame, color=color, linestyle=':', alpha=0.5)
 
-    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize='x-small', ncol=1)
-    plt.tight_layout()
+    # Set y-axis limits to leave space below the final/lowest plotted curves
+    y_min = df[metric].min()
+    y_max = df[metric].max()
+    y_range = y_max - y_min
+    if y_range > 0:
+        plt.ylim(y_min - 0.15 * y_range, y_max + 0.05 * y_range)
+    else:
+        plt.ylim(y_min - 5.0, y_max + 5.0)
+
+    # Determine dynamic number of columns in the legend based on cycle count
+    num_cycles = len(cycles)
+    ncol = 1
+    if num_cycles > 15:
+        ncol = 3
+    elif num_cycles > 8:
+        ncol = 2
+
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize='x-small', ncol=ncol)
+    plt.tight_layout(rect=[0, 0.05, 1, 1]) # leaves space below the final plot
     plt.savefig(output_path, dpi=200)
     plt.close()
 
 def plot_frame_analytics(df, analytics_dir):
-    """Generates scatter plots for first/last merged frames with shifted axes."""
+    """Generates scatter plots for first/last merged frames without any area metrics."""
     if df.empty: return
     os.makedirs(analytics_dir, exist_ok=True)
     
     merged_df = df[df['IsMerged']]
     if merged_df.empty: return
     
-    area_col = 'Precise_Area' if 'Precise_Area' in merged_df.columns else 'BBox_Area'
-    perim_col = 'Precise_Perim' if 'Precise_Perim' in merged_df.columns else 'BBox_Area'
-    
-    # 1. PER FRAME AVERAGES
+    # 1. PER FRAME AVERAGES (No Area)
     metrics = {
         'BBox_Length': ['mean', 'min', 'max'],
         'BBox_Breadth': ['mean', 'min', 'max'],
-        area_col: ['mean', 'min', 'max'],
         'Precise_Perim': ['mean', 'min', 'max']
     }
     
@@ -94,7 +194,7 @@ def plot_frame_analytics(df, analytics_dir):
     avg_df = avg_df.reset_index()
     avg_df.to_csv(os.path.join(analytics_dir, 'per_frame_averages.csv'), index=False)
     
-    # 2. SCATTER DATA
+    # 2. SCATTER DATA (No Area)
     scatter_data = []
     for c in merged_df['Cycle'].unique():
         c_df = merged_df[merged_df['Cycle'] == c].sort_values('RelativeFrame')
@@ -105,30 +205,38 @@ def plot_frame_analytics(df, analytics_dir):
             'First_Length': c_df.iloc[0]['BBox_Length'],
             'First_Breadth': c_df.iloc[0]['BBox_Breadth'],
             'First_Perim': c_df.iloc[0]['Precise_Perim'],
-            'First_Area': c_df.iloc[0][area_col],
             'Last_Frame': c_df.iloc[-1]['RelativeFrame'],
             'Last_Length': c_df.iloc[-1]['BBox_Length'],
             'Last_Breadth': c_df.iloc[-1]['BBox_Breadth'],
             'Last_Perim': c_df.iloc[-1]['Precise_Perim'],
-            'Last_Area': c_df.iloc[-1][area_col],
         })
     s_df = pd.DataFrame(scatter_data)
     
     def render_scatter(data, prefix, title, filename):
-        fig, axes = plt.subplots(2, 2, figsize=(18, 15))
-        fig.suptitle(title, fontsize=20)
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig.suptitle(title, fontsize=16)
         metrics_to_plot = [
             (f'{prefix}_Length', 'Length (px)'),
             (f'{prefix}_Breadth', 'Breadth (px)'),
-            (f'{prefix}_Perim', 'Perimeter (px)'),
-            (f'{prefix}_Area', 'Area (px^2)')
+            (f'{prefix}_Perim', 'Perimeter (px)')
         ]
         for i, (m, label) in enumerate(metrics_to_plot):
-            ax = axes[i//2, i%2]
+            ax = axes[i]
             sc = ax.scatter(data[m], data[f'{prefix}_Frame'], c=data['Cycle'], cmap='viridis', s=80, edgecolors='k', alpha=0.8)
             ax.set_xlabel(label); ax.set_ylabel('Relative Frame Number')
             ax.grid(True, linestyle='--', alpha=0.6)
-        fig.colorbar(sc, ax=axes.ravel().tolist(), label='Cycle')
+            
+            # Leave space below the lowest plotted points
+            y_min = data[f'{prefix}_Frame'].min()
+            y_max = data[f'{prefix}_Frame'].max()
+            y_range = y_max - y_min
+            if y_range > 0:
+                ax.set_ylim(bottom=y_min - 0.15 * y_range)
+            else:
+                ax.set_ylim(bottom=y_min - 5.0)
+
+        fig.colorbar(sc, ax=axes.tolist(), label='Cycle')
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
         plt.savefig(os.path.join(analytics_dir, filename), dpi=200)
         plt.close()
 
